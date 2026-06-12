@@ -230,6 +230,8 @@ app.UseAuthorization();
 
 app.UseMiddleware<PolicyMiddleware>();
 
+app.MapGet("/health", () => Results.Ok("Healthy"));
+
 app.MapControllers();
 
 #endregion

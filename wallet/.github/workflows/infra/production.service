@@ -1,0 +1,29 @@
+[Unit]
+Description=Wallet API (Production)
+After=network.target
+
+[Service]
+# Run user
+User=ubuntu
+Group=ubuntu
+
+# App path (current symlink)
+WorkingDirectory=/var/www/walletapi/current
+
+# Start command
+ExecStart=/usr/bin/dotnet /var/www/walletapi/current/wallet.dll
+
+# Environment
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=ASPNETCORE_URLS=http://localhost:5001
+EnvironmentFile=/etc/walletapi.env
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Logging 
+SyslogIdentifier=walletapi-prod
+
+[Install]
+WantedBy=multi-user.target

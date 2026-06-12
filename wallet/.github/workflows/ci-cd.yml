@@ -1,0 +1,38 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+
+  staging:
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+     environment: staging
+    secrets:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+      DB_CONNECTION: ${{ secrets.DB_CONNECTION }}
+      JWT_KEY: ${{ secrets.JWT_KEY }}
+      JWT_ENCRYPTION_KEY: ${{ secrets.JWT_ENCRYPTION_KEY }}
+      PAYMENT_SECRET_KEY: ${{ secrets.PAYMENT_SECRET_KEY }}
+
+  production:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      environment: Production
+
+    secrets:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+      DB_CONNECTION: ${{ secrets.DB_CONNECTION }}
+      JWT_KEY: ${{ secrets.JWT_KEY }}
+      JWT_ENCRYPTION_KEY: ${{ secrets.JWT_ENCRYPTION_KEY }}
+      PAYMENT_SECRET_KEY: ${{ secrets.PAYMENT_SECRET_KEY }}

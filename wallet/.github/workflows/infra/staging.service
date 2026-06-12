@@ -1,0 +1,20 @@
+[Unit]
+Description=Wallet API (Staging)
+After=network.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+
+WorkingDirectory=/var/www/walletapi-staging/current
+ExecStart=/usr/bin/dotnet /var/www/walletapi-staging/current/wallet.dll
+
+Environment=ASPNETCORE_ENVIRONMENT=Staging
+Environment=ASPNETCORE_URLS=http://localhost:5151
+EnvironmentFile=/etc/walletapi-staging.env
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

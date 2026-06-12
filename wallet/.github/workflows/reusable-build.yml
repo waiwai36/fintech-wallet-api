@@ -1,0 +1,228 @@
+name: Reusable .NET Build and Deploy
+
+on:
+  workflow_call:
+    inputs:
+      target_path:
+        description: 'Base deploy path'
+        required: false
+        type: string
+        default: '/var/www'
+      environment:
+        description: 'staging or production'
+        required: true
+        type: string
+    secrets:
+      EC2_HOST:
+        required: true
+      EC2_USERNAME:
+        required: true
+      EC2_SSH_KEY:
+        required: true
+      DB_CONNECTION:
+        required: true
+      JWT_KEY:
+        required: true
+      JWT_ENCRYPTION_KEY:
+        required: true
+      PAYMENT_SECRET_KEY:
+        required: true
+
+jobs:
+  # =========================
+  # 1️⃣ BUILD JOB
+  # =========================
+  build:
+    runs-on: ubuntu-latest 
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+        
+      - name: Publish
+        run: dotnet publish -c Release -o ./publish-out --no-build
+        
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-api-binary
+          path: ./publish-out/
+          retention-days: 1
+
+  # =========================
+  # 2️⃣ DEPLOY JOB
+  # =========================
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    environment: ${{ inputs.environment }}
+    
+    env:
+      TEMP_BASE: "/home/${{ secrets.EC2_USERNAME }}/deploytemp"
+      APP_TEMP: "/home/${{ secrets.EC2_USERNAME }}/deploytemp/app"
+      INFRA_TEMP: "/home/${{ secrets.EC2_USERNAME }}/deploytemp/infra"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dotnet-api-binary
+          path: ./publish-out
+
+      - name: Generate Environment File
+        run: |-
+          cat > walletapi.env << EOF
+          ConnectionStrings__Wallet=${{ secrets.DB_CONNECTION }}
+          Jwt__Key=${{ secrets.JWT_KEY }}
+          Jwt__EncryptionKey=${{ secrets.JWT_ENCRYPTION_KEY }}
+          PaymentGateway__SecretKey=${{ secrets.PAYMENT_SECRET_KEY }}
+          EOF     
+
+      - name: Set Deployment Variables
+        id: env
+        run: |
+          if [ "${{ inputs.environment }}" = "production" ]; then
+            echo "APP_NAME=walletapi" >> $GITHUB_OUTPUT
+            echo "SERVICE_NAME=production.service" >> $GITHUB_OUTPUT
+            echo "PORT=5001" >> $GITHUB_OUTPUT
+            echo "BASE_PATH=${{ inputs.target_path }}/walletapi" >> $GITHUB_OUTPUT
+            echo "ENV_FILE=/etc/walletapi.env" >> $GITHUB_OUTPUT
+          else
+            echo "APP_NAME=walletapi-staging" >> $GITHUB_OUTPUT
+            echo "SERVICE_NAME=staging.service" >> $GITHUB_OUTPUT
+            echo "PORT=5151" >> $GITHUB_OUTPUT
+            echo "BASE_PATH=${{ inputs.target_path }}/walletapi-staging" >> $GITHUB_OUTPUT
+            echo "ENV_FILE=/etc/walletapi-staging.env" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Prepare Temp Directories on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |                   
+            mkdir -p ${{ env.APP_TEMP }}
+            mkdir -p ${{ env.INFRA_TEMP }}
+     
+      - name: Copy App Build
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: ./publish-out/*
+          target: ${{ env.APP_TEMP }}
+          strip_components: 1
+
+      - name: Copy Infra Files
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: ".github/workflows/infra/*"
+          target: ${{ env.INFRA_TEMP }}
+          strip_components: 3
+
+      - name: Copy Environment File
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: walletapi.env
+          target: ${{ env.INFRA_TEMP }}
+          
+      - name: Deploy Application
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            # Variables from Workflow
+            
+            BASE_PATH=${{ steps.env.outputs.BASE_PATH }}
+            SERVICE=${{ steps.env.outputs.SERVICE_NAME }}
+            APP=${{ steps.env.outputs.APP_NAME }}
+            PORT=${{ steps.env.outputs.PORT }}
+            ENV_FILE=${{ steps.env.outputs.ENV_FILE }}
+
+            APP_TEMP=${{ env.APP_TEMP }}
+            INFRA_TEMP=${{ env.INFRA_TEMP }}
+            USER=${{ secrets.EC2_USERNAME }}
+
+            TIMESTAMP=$(date +%Y%m%d-%H%M)
+            RELEASE_PATH=$BASE_PATH/releases/$TIMESTAMP
+
+            # 1. Create structure
+            sudo mkdir -p $BASE_PATH/releases     
+            sudo chown -R $USER:$USER $BASE_PATH
+            sudo chmod -R 755 $BASE_PATH
+
+            # 2. New release
+            sudo mkdir -p $RELEASE_PATH
+            sudo cp -r $APP_TEMP/* $RELEASE_PATH/
+
+            # 3. Switch current link
+            sudo ln -sfn $RELEASE_PATH $BASE_PATH/current
+            sudo cp $INFRA_TEMP/walletapi.env $ENV_FILE                      
+            sudo chmod 600 $ENV_FILE
+            sudo chown root:root $ENV_FILE
+
+            # 4. Setup systemd
+            if [ -f "$INFRA_TEMP/$SERVICE" ]; then
+              sudo cp $INFRA_TEMP/$SERVICE /etc/systemd/system/
+              sudo systemctl daemon-reload
+              sudo systemctl enable $SERVICE
+            fi
+
+            # 5. Setup nginx
+            if [ -f "$INFRA_TEMP/walletapi.conf" ]; then
+              sudo cp $INFRA_TEMP/walletapi.conf /etc/nginx/sites-available/$APP
+              sudo ln -sf /etc/nginx/sites-available/$APP /etc/nginx/sites-enabled/
+              sudo nginx -t && sudo systemctl restart nginx
+            fi
+
+            # 6. Restart & Health check
+            sudo systemctl restart $SERVICE
+
+            sleep 10
+            curl -f http://localhost:$PORT/health || (echo "Health check failed" && exit 1)
+           
+            # 7. Keep latest 5 releases
+             sudo ls -dt $BASE_PATH/releases/* \
+              | tail -n +6 \
+              | xargs -r sudo rm -rf
+
+            echo "Deploy Success"
+
+      - name: Cleanup
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: sudo rm -rf ${{ env.TEMP_BASE }}
+            
