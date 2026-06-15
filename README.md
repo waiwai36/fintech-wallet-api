@@ -163,18 +163,18 @@ fintech-wallet-api/
 
 This repository includes a reusable GitHub Actions workflow for build and deployment.
 
-```mermaid
-flowchart LR
-    A["Push to develop"] --> B["Staging workflow"]
-    C["Push to main"] --> D["Production workflow"]
-    B --> E["Restore and build"]
-    D --> E
-    E --> F["Publish artifact"]
-    F --> G["Copy to EC2"]
-    G --> H["Update current release"]
-    H --> I["Restart systemd service"]
-    I --> J["Nginx reverse proxy"]
-    J --> K["Health check /health"]
+```text
+Push to develop  -> Staging workflow
+Push to main     -> Production workflow
+
+Workflow:
+Restore and build
+-> Publish artifact
+-> Copy to EC2
+-> Update current release
+-> Restart systemd service
+-> Nginx reverse proxy
+-> Health check /health
 ```
 
 ### Workflow Files
