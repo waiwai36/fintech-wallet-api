@@ -470,3 +470,5 @@ Failure response:
 - `systemd` keeps the API running as a service.
 - GitHub Actions performs a `/health` check after deployment.
 - The deployment keeps the latest 5 release folders on the server.
+
+# fintech-wallet-api
