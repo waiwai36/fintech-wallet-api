@@ -19,6 +19,8 @@
             public const string TransferIn = "TransferIn";
             public const string TransferOut = "TransferOut";
             public const string Adjustment = "Adjustment";
+            public const string Credit = "Credit";
+            public const string Debit = "Debit";
         }
 
         // Payment Methods

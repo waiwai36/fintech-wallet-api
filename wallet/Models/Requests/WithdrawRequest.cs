@@ -8,5 +8,8 @@ namespace wallet.Models.Requests
         [Range(1000, 1000000, ErrorMessage = "Withdrawal amount must be greater than zero.")]     
         public decimal Amount { get; set; }
         public string Description { get; set; }
+
+        [StringLength(50)]
+        public string? ReferenceNo { get; set; }
     }
 }
