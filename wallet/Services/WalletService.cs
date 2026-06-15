@@ -1,4 +1,3 @@
-﻿using Microsoft.EntityFrameworkCore;
 using wallet.Constants;
 using wallet.DALs.Interfaces;
 using wallet.Data.Entities;
@@ -6,6 +5,7 @@ using wallet.Exceptions;
 using wallet.Helpers;
 using wallet.Models.Requests;
 using wallet.Models.Responses;
+using wallet.Services.Infrastructure;
 using wallet.Utils;
 
 namespace wallet.Services
@@ -14,11 +14,16 @@ namespace wallet.Services
     {
         private readonly IUnitOfWork _unitOfWork;
         private readonly IWalletValidator _walletValidator;
+        private readonly IClock _clock;
 
-        public WalletService(IUnitOfWork unitOfWork, IWalletValidator validator)
+        public WalletService(
+            IUnitOfWork unitOfWork,
+            IWalletValidator validator,
+            IClock clock)
         {
             _unitOfWork = unitOfWork;
             _walletValidator = validator;
+            _clock = clock;
         }
 
         #region Manual Bank Deposit;
@@ -26,9 +31,8 @@ namespace wallet.Services
         {
 
             var wallet = await _unitOfWork.Wallets.GetWalletByUserIdAsync(userId);
-
             _walletValidator.ValidateState(wallet);
-
+          
             string referenceNo = IdentifierFactory.ReferenceNo("DEP-BANK");
 
             var transaction = new Transaction
@@ -43,27 +47,14 @@ namespace wallet.Services
                 AfterBalance = wallet.Balance,
                 Description = $"[Bank: {request.BankName}] {request.Remark}",
                 Status = TransactionConstants.Status.Pending,
-                CreatedAt = DateTime.UtcNow,
+                CreatedAt = _clock.UtcNow,
                 CreatedBy = requestedBy
             };
 
-            using var dbTransaction = await _unitOfWork.BeginTransactionAsync();
-            try
-            {
+            await WalletTransactionHelper.ExecuteAsync(_unitOfWork, async () =>
+            { 
                 await _unitOfWork.Transactions.AddAsync(transaction);
-                await _unitOfWork.SaveChangesAsync();
-                await dbTransaction.CommitAsync();
-            }
-            catch (DbUpdateConcurrencyException)
-            {
-                await dbTransaction.RollbackAsync();
-                throw new AppException("Another transaction is in progress. Please wait and try again.", StatusCodes.Status409Conflict);
-            }
-            catch (Exception)
-            {
-                await dbTransaction.RollbackAsync();
-                throw;
-            }
+            }, "Another transaction is in progress. Please wait and try again.");
 
             return new DepositResponse
             {
@@ -77,48 +68,52 @@ namespace wallet.Services
 
         public async Task<DepositResponse> ApproveBankDepositAsync(ApproveDepositRequest request, string requestedBy)
         {
-            var transaction = await _unitOfWork.Transactions.GetByTransactionByRefNoAsync(request.ReferenceNo);
+            var transaction = await _unitOfWork.Transactions.GetAnyByReferenceNoAsync(request.ReferenceNo);
             if (transaction == null)
-                throw new AppException("Pending bank deposit record not found.", StatusCodes.Status404NotFound);
+                throw new AppException("Bank deposit record not found.", StatusCodes.Status404NotFound);
 
             var wallet = await _unitOfWork.Wallets.GetWalletByIdAsync(transaction.WalletId);
 
             _walletValidator.ValidateState(wallet);
+           
+            if (transaction.TransactionType != TransactionConstants.Type.Deposit ||
+                transaction.PaymentMethod != TransactionConstants.PaymentMethod.ManualBankTransfer)
+                throw new AppException("Reference number is not a manual bank deposit.", StatusCodes.Status400BadRequest);
+
+            if (transaction.Status == TransactionConstants.Status.Success)
+            {
+                return new DepositResponse
+                {
+                    WalletNumber = wallet.WalletNumber,
+                    Balance = wallet.Balance,
+                    PaymentMethod = TransactionConstants.PaymentMethod.ManualBankTransfer,
+                    ReferenceNo = request.ReferenceNo,
+                    Status = TransactionConstants.Status.Success
+                };
+            }
+
+            if (transaction.Status != TransactionConstants.Status.Pending)
+                throw new AppException("Only pending bank deposits can be approved.", StatusCodes.Status400BadRequest);
 
             decimal beforeBalance = wallet.Balance;
             decimal afterBalance = beforeBalance + transaction.Amount;
 
             wallet.Balance = afterBalance;
-            wallet.LastTransactionAt = DateTime.UtcNow;
-            wallet.UpdatedAt = DateTime.UtcNow;
-            wallet.UpdatedBy = requestedBy;
+            WalletAuditHelper.TouchForTransaction(wallet, _clock.UtcNow, requestedBy);
 
             transaction.BeforeBalance = beforeBalance;
             transaction.AfterBalance = afterBalance;
             transaction.Status = TransactionConstants.Status.Success;
-            transaction.UpdatedAt = DateTime.UtcNow;
+            transaction.UpdatedAt = _clock.UtcNow;
             transaction.UpdatedBy = requestedBy;
 
-            using var dbTransaction = await _unitOfWork.BeginTransactionAsync();
-            try
+            await WalletTransactionHelper.ExecuteAsync(_unitOfWork, () =>
             {
                 _unitOfWork.Wallets.UpdateWallet(wallet);
                 _unitOfWork.Transactions.Update(transaction);
 
-                await _unitOfWork.SaveChangesAsync();
-                await dbTransaction.CommitAsync();
-
-            }
-            catch (DbUpdateConcurrencyException)
-            {
-                await dbTransaction.RollbackAsync();
-                throw new AppException("Another transaction is in progress. Please wait and try again.", StatusCodes.Status409Conflict);
-            }
-            catch (Exception)
-            {
-                await dbTransaction.RollbackAsync();
-                throw;
-            }
+                return Task.CompletedTask;
+            }, "Another transaction is in progress. Please wait and try again.");
 
             return new DepositResponse
             {
@@ -131,168 +126,169 @@ namespace wallet.Services
         }
 
         #endregion;
-
-        public async Task<WithDrawResponse> WithdrawAsync(int userId, WithdrawRequest requset, string requestedBy)
+        
+        #region Withdraw & Transfer
+        public async Task<WithDrawResponse> WithdrawAsync(int userId, WithdrawRequest request, string requestedBy)
         {
 
             var wallet = await _unitOfWork.Wallets.GetWalletByUserIdAsync(userId);
             _walletValidator.ValidateState(wallet);
+         
+            var referenceNo = TransactionReferenceHelper.ResolveReferenceNo(request.ReferenceNo, "WTH");
+            var existingTransaction = await TransactionReferenceHelper.GetExistingTransactionAsync(_unitOfWork, referenceNo);
+            
+            if (existingTransaction != null)
+            {
+                if (existingTransaction.Status == TransactionConstants.Status.Success)
+                {
+                    return new WithDrawResponse
+                    {
+                        WalletNumber = wallet.WalletNumber,
+                        Balance = wallet.Balance,
+                        ReferenceNo = existingTransaction.ReferenceNo ?? string.Empty
+                    };
+                }
+            }
 
-            if (wallet!.Balance < requset.Amount)
+            if (wallet.Balance < request.Amount)
                 throw new AppException("Insufficient wallet balance.", StatusCodes.Status400BadRequest);
 
-            var todayWithdrawn = await _unitOfWork.Transactions.GetDailyAmountByTypeAsync(wallet.WalletId, DateTime.UtcNow, TransactionConstants.Type.Withdraw);
-            if (todayWithdrawn + requset.Amount > wallet.DailyWithdrawLimit)
+            var (startUtc, endUtc) = _clock.BusinessDayUtcRange;
+            var todayWithdrawn = await _unitOfWork.Transactions.GetDailyAmountByTypeAsync(wallet.WalletId, startUtc, endUtc, TransactionConstants.Type.Withdraw);
+            if (todayWithdrawn + request.Amount > wallet.DailyWithdrawLimit)
             {
                 throw new AppException($"Daily withdrawal limit exceeded (Daily Limit: {wallet.DailyWithdrawLimit}).", StatusCodes.Status400BadRequest);
             }
 
-            using var dbTransaction = await _unitOfWork.BeginTransactionAsync();
-            try
+            decimal beforeBalance = wallet.Balance;
+            wallet.Balance -= request.Amount;
+            WalletAuditHelper.TouchForTransaction(wallet, _clock.UtcNow, requestedBy);
+
+            var transaction = new Transaction
             {
-                decimal beforeBalance = wallet.Balance;
-                wallet.Balance -= requset.Amount;
-                wallet.LastTransactionAt = DateTime.UtcNow;
-                wallet.UpdatedAt = DateTime.UtcNow;
-                wallet.UpdatedBy = requestedBy;
+                TransactionId = Guid.NewGuid(),
+                WalletId = wallet.WalletId,
+                ReferenceNo = referenceNo,
+                TransactionType = TransactionConstants.Type.Withdraw,
+                Amount = request.Amount,
+                BeforeBalance = beforeBalance,
+                AfterBalance = wallet.Balance,
+                Description = request.Description,
+                Status = TransactionConstants.Status.Success,
+                CreatedAt = _clock.UtcNow,
+                CreatedBy = requestedBy
+            };
 
-                var transaction = new Transaction
-                {
-                    TransactionId = Guid.NewGuid(),
-                    WalletId = wallet.WalletId,
-                    ReferenceNo = IdentifierFactory.ReferenceNo("WTH"),
-                    TransactionType = TransactionConstants.Type.Withdraw,
-                    Amount = requset.Amount,
-                    BeforeBalance = beforeBalance,
-                    AfterBalance = wallet.Balance,
-                    Description = requset.Description,
-                    Status = TransactionConstants.Status.Success,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = requestedBy
-                };
-
+            await WalletTransactionHelper.ExecuteAsync(_unitOfWork, async () =>
+            {
                 _unitOfWork.Wallets.UpdateWallet(wallet);
                 await _unitOfWork.Transactions.AddAsync(transaction);
+            }, "Balance was modified by another transaction. Please try again.");
 
-                await _unitOfWork.SaveChangesAsync();
-                await dbTransaction.CommitAsync();
-
-                return new WithDrawResponse
-                {
-                    WalletNumber = wallet.WalletNumber,
-                    Balance = wallet.Balance,
-                    ReferenceNo = transaction.ReferenceNo
-                };
-            }
-            catch (DbUpdateConcurrencyException)
+            return new WithDrawResponse
             {
-                await dbTransaction.RollbackAsync();
-                throw new AppException("Balance was modified by another transaction. Please try again.", StatusCodes.Status409Conflict);
-            }
-            catch (Exception)
-            {
-                await dbTransaction.RollbackAsync();
-                throw;
-            }
+                WalletNumber = wallet.WalletNumber,
+                Balance = wallet.Balance,
+                ReferenceNo = transaction.ReferenceNo ?? string.Empty
+            };
         }
 
         public async Task<TransferResponse> TransferAsync(int senderUserId, TransferRequest request, string requestedBy)
         {
             var senderWallet = await _unitOfWork.Wallets.GetWalletByUserIdAsync(senderUserId);
-            _walletValidator.ValidateState(senderWallet);
-
-            if (senderWallet!.WalletNumber == request.ReceiverWalletNumber)
-                throw new AppException("Transfers to your own wallet are not allowed.", StatusCodes.Status400BadRequest);
-
-            var receiverWallet = await _unitOfWork.Wallets.GetWalletByNumberAsync(request.ReceiverWalletNumber);
+            _walletValidator.ValidateState(senderWallet);        
+            
+             var receiverWallet = await _unitOfWork.Wallets.GetWalletByNumberAsync(request.ReceiverWalletNumber);
             _walletValidator.ValidateState(receiverWallet);
+           
+            if (senderWallet.WalletNumber == request.ReceiverWalletNumber)
+                throw new AppException("Transfers to your own wallet are not allowed.", StatusCodes.Status400BadRequest);
+          
+            var (referenceNo, senderReferenceNo, receiverReferenceNo) = TransactionReferenceHelper.ResolveTransferReferenceNos(request.ReferenceNo);
+            var existingTransaction = await TransactionReferenceHelper.GetExistingTransactionAsync(_unitOfWork, referenceNo);
+            
+            if (existingTransaction != null)
+            {
+                if (existingTransaction.Status == TransactionConstants.Status.Success)
+                {
+                    return new TransferResponse
+                    {
+                        Status = existingTransaction.Status,
+                        ReferenceNo = referenceNo
+                    };
+                }
+            }
 
-            if (senderWallet.Currency != receiverWallet!.Currency)
+            if (senderWallet.Currency != receiverWallet.Currency)
                 throw new AppException("Transfers between different currencies are not allowed.", StatusCodes.Status400BadRequest);
 
             if (senderWallet.Balance < request.Amount)
                 throw new AppException("Insufficient wallet balance.", StatusCodes.Status400BadRequest);
 
-            var todayTransferred = await _unitOfWork.Transactions.GetDailyAmountByTypeAsync(senderWallet.WalletId, DateTime.UtcNow, TransactionConstants.Type.TransferOut);
+            var (startUtc, endUtc) = _clock.BusinessDayUtcRange;
+            var todayTransferred = await _unitOfWork.Transactions.GetDailyAmountByTypeAsync(senderWallet.WalletId, startUtc, endUtc, TransactionConstants.Type.TransferOut);
             if (todayTransferred + request.Amount > senderWallet.DailyTransferLimit)
             {
                 throw new AppException($"Daily transfer limit exceeded (Daily Limit: {senderWallet.DailyTransferLimit}).", StatusCodes.Status400BadRequest);
             }
 
-            using var dbTransaction = await _unitOfWork.BeginTransactionAsync();
-            try
+            decimal senderBeforeBalance = senderWallet.Balance;
+            senderWallet.Balance -= request.Amount;
+            WalletAuditHelper.TouchForTransaction(senderWallet, _clock.UtcNow, requestedBy);
+
+            decimal receiverBeforeBalance = receiverWallet.Balance;
+            receiverWallet.Balance += request.Amount;
+            WalletAuditHelper.TouchForTransaction(receiverWallet, _clock.UtcNow, requestedBy);
+
+            var senderTxn = new Transaction
             {
-                decimal senderBeforeBalance = senderWallet.Balance;
-                senderWallet.Balance -= request.Amount;
-                senderWallet.LastTransactionAt = DateTime.UtcNow;
-                senderWallet.UpdatedAt = DateTime.UtcNow;
-                senderWallet.UpdatedBy = requestedBy;
+                TransactionId = Guid.NewGuid(),
+                WalletId = senderWallet.WalletId,
+                ReferenceNo = senderReferenceNo,
+                TransactionType = TransactionConstants.Type.TransferOut,
+                Amount = request.Amount,
+                BeforeBalance = senderBeforeBalance,
+                AfterBalance = senderWallet.Balance,
+                Description = $"To Wallet: {receiverWallet.WalletNumber}",
+                Status = TransactionConstants.Status.Success,
+                RelatedWalletId = receiverWallet.WalletId,
+                CreatedAt = _clock.UtcNow,
+                CreatedBy = requestedBy
+            };
 
-                decimal receiverBeforeBalance = receiverWallet.Balance;
-                receiverWallet.Balance += request.Amount;
-                receiverWallet.LastTransactionAt = DateTime.UtcNow;
-                receiverWallet.UpdatedAt = DateTime.UtcNow;
-                receiverWallet.UpdatedBy = requestedBy;
+            var receiverTxn = new Transaction
+            {
+                TransactionId = Guid.NewGuid(),
+                WalletId = receiverWallet.WalletId,
+                ReferenceNo = receiverReferenceNo,
+                TransactionType = TransactionConstants.Type.TransferIn,
+                Amount = request.Amount,
+                BeforeBalance = receiverBeforeBalance,
+                AfterBalance = receiverWallet.Balance,
+                Description = $"From Wallet: {senderWallet.WalletNumber}",
+                Status = TransactionConstants.Status.Success,
+                RelatedWalletId = senderWallet.WalletId,
+                CreatedAt = _clock.UtcNow,
+                CreatedBy = requestedBy
+            };
 
-                string referenceNo = IdentifierFactory.ReferenceNo("TRF");
-
-                var senderTxn = new Transaction
-                {
-                    TransactionId = Guid.NewGuid(),
-                    WalletId = senderWallet.WalletId,
-                    ReferenceNo = referenceNo,
-                    TransactionType = TransactionConstants.Type.TransferOut,
-                    Amount = request.Amount,
-                    BeforeBalance = senderBeforeBalance,
-                    AfterBalance = senderWallet.Balance,
-                    Description = $"To Wallet: {receiverWallet.WalletNumber}",
-                    Status = TransactionConstants.Status.Success,
-                    RelatedWalletId = receiverWallet.WalletId,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = requestedBy
-                };
-
-                var receiverTxn = new Transaction
-                {
-                    TransactionId = Guid.NewGuid(),
-                    WalletId = receiverWallet.WalletId,
-                    ReferenceNo = referenceNo,
-                    TransactionType = TransactionConstants.Type.TransferIn,
-                    Amount = request.Amount,
-                    BeforeBalance = receiverBeforeBalance,
-                    AfterBalance = receiverWallet.Balance,
-                    Description = $"From Wallet: {senderWallet.WalletNumber}",
-                    Status = TransactionConstants.Status.Success,
-                    RelatedWalletId = senderWallet.WalletId,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = requestedBy
-                };
-
+            await WalletTransactionHelper.ExecuteAsync(_unitOfWork, async () =>
+            {
                 _unitOfWork.Wallets.UpdateWallet(senderWallet);
                 _unitOfWork.Wallets.UpdateWallet(receiverWallet);
                 await _unitOfWork.Transactions.AddRangeAsync(senderTxn, receiverTxn);
+            }, "A conflicting transaction occurred. Please try again.");
 
-                await _unitOfWork.SaveChangesAsync();
-                await dbTransaction.CommitAsync();
-
-                return new TransferResponse
-                {
-                    Status = TransactionConstants.Status.Success,
-                    ReferenceNo = referenceNo
-                };
-            }
-            catch (DbUpdateConcurrencyException)
+            return new TransferResponse
             {
-                await dbTransaction.RollbackAsync();
-                throw new AppException("A conflicting transaction occurred. Please try again.", StatusCodes.Status409Conflict);
-            }
-            catch (Exception)
-            {
-                await dbTransaction.RollbackAsync();
-                throw;
-            }
+                Status = TransactionConstants.Status.Success,
+                ReferenceNo = referenceNo
+            };
         }
+       
+        #endregion;
 
+        #region Reporting & Management
         public async Task<BankStatementResponse> GetBankStatementAsync(int userId, TransactionFilterRequest filter)
         {
             filter.PageNumber = filter.PageNumber < 1 ? 1 : filter.PageNumber;
@@ -300,7 +296,7 @@ namespace wallet.Services
 
             var wallet = await _unitOfWork.Wallets.GetWalletByUserIdAsync(userId);
             _walletValidator.ValidateState(wallet);
-
+           
             var (opening, totalCredit, totalDebit, closing, totalCount) = await _unitOfWork.Transactions.GetStatementSummaryAsync(wallet.WalletId, filter);
             var transactions = await _unitOfWork.Transactions.GetPagedTransactionsAsync(wallet.WalletId, filter);
 
@@ -312,14 +308,14 @@ namespace wallet.Services
                 Account = new BankStatementAccount
                 {
                     AccountNumber = wallet.WalletNumber,
-                    AccountHolder = wallet.User?.UserName,
+                    AccountHolder = wallet.User?.UserName ?? string.Empty,
                     Currency = wallet.Currency
                 },
                 Period = new BankStatementPeriod
                 {
                     From = filter.FromDate,
                     To = filter.ToDate,
-                    GeneratedAt = DateTime.UtcNow,
+                    GeneratedAt = _clock.UtcNow,
                     CurrentPage = filter.PageNumber,
                     PageSize = filter.PageSize,
                     TotalPages = totalPages,
@@ -340,8 +336,8 @@ namespace wallet.Services
                     Reference = t.ReferenceNo ?? string.Empty,
                     BeforeBalance = t.BeforeBalance,
                     AfterBalance = t.AfterBalance,
-                    Credit = (t.TransactionType == TransactionConstants.Type.Deposit || t.TransactionType == TransactionConstants.Type.TransferIn || t.TransactionType == "Credit") ? t.Amount : null,
-                    Debit = (t.TransactionType == TransactionConstants.Type.Withdraw || t.TransactionType == TransactionConstants.Type.TransferOut || t.TransactionType == "Debit") ? t.Amount : null
+                    Credit = TransactionDirectionHelper.IsCredit(t.TransactionType) ? t.Amount : null,
+                    Debit = TransactionDirectionHelper.IsDebit(t.TransactionType) ? t.Amount : null
                 }).ToList()
             };
         }
@@ -349,11 +345,12 @@ namespace wallet.Services
         public async Task<WalletDetailsResponse> GetWalletDetailsAsync(int userId)
         {
             var wallet = await _unitOfWork.Wallets.GetWalletByUserIdAsync(userId);
-
+            _walletValidator.ValidateState(wallet);
+           
             return new WalletDetailsResponse
             {
                 WalletNumber = wallet.WalletNumber,
-                AccountHolder = wallet.User.UserName,
+                AccountHolder = wallet.User?.UserName ?? string.Empty,
                 Balance = wallet.Balance,
                 Currency = wallet.Currency,
                 Status = wallet.Status,
@@ -367,7 +364,7 @@ namespace wallet.Services
         public async Task<AdjustBalanceResponse> AdjustBalanceAsync(AdjustBalanceRequest request, string requestedBy)
         {
             var wallet = await _unitOfWork.Wallets.GetWalletByNumberAsync(request.WalletNumber);
-            _walletValidator.ValidateState(wallet);
+            _walletValidator.ValidateState(wallet);          
 
             decimal beforeBalance = wallet.Balance;
             decimal afterBalance = request.Action switch
@@ -379,72 +376,56 @@ namespace wallet.Services
                 _ => throw new ArgumentException("Invalid adjustment action.")
             };
 
-            using var dbTransaction = await _unitOfWork.BeginTransactionAsync();
-            try
+            wallet.Balance = afterBalance;
+            WalletAuditHelper.TouchForTransaction(wallet, _clock.UtcNow, requestedBy);
+
+            string referenceNo = IdentifierFactory.ReferenceNo("ADJ");
+            string transactionType = request.Action switch
             {
-                wallet.Balance = afterBalance;
-                wallet.LastTransactionAt = DateTime.UtcNow;
-                wallet.UpdatedAt = DateTime.UtcNow;
-                wallet.UpdatedBy = requestedBy;
+                AdjustmentAction.Credit => TransactionConstants.Type.Credit,
+                AdjustmentAction.Debit => TransactionConstants.Type.Debit,
+                _ => throw new ArgumentException("Invalid action for transaction type.")
+            };
 
-                string referenceNo = IdentifierFactory.ReferenceNo("ADJ");
-                string transactionType = request.Action switch
-                {
-                    AdjustmentAction.Credit => "Credit",
-                    AdjustmentAction.Debit => "Debit",
-                    _ => throw new ArgumentException("Invalid action for transaction type.")
-                };
+            var transaction = new Transaction
+            {
+                TransactionId = Guid.NewGuid(),
+                WalletId = wallet.WalletId,
+                ReferenceNo = referenceNo,
+                TransactionType = transactionType,
+                PaymentMethod = TransactionConstants.PaymentMethod.AdminAdjustment,
+                Amount = request.Amount,
+                BeforeBalance = beforeBalance,
+                AfterBalance = afterBalance,
+                Description = request.Remark,
+                Status = TransactionConstants.Status.Success,
+                CreatedAt = _clock.UtcNow,
+                CreatedBy = requestedBy
+            };
 
-                var transaction = new Transaction
-                {
-                    TransactionId = Guid.NewGuid(),
-                    WalletId = wallet.WalletId,
-                    ReferenceNo = referenceNo,
-                    TransactionType = transactionType,
-                    PaymentMethod = TransactionConstants.PaymentMethod.AdminAdjustment,
-                    Amount = request.Amount,
-                    BeforeBalance = beforeBalance,
-                    AfterBalance = afterBalance,
-                    Description = request.Remark,
-                    Status = TransactionConstants.Status.Success,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = requestedBy
-                };
-
+            await WalletTransactionHelper.ExecuteAsync(_unitOfWork, async () =>
+            {
                 _unitOfWork.Wallets.UpdateWallet(wallet);
                 await _unitOfWork.Transactions.AddAsync(transaction);
+            }, "Balance was modified by another transaction. Please try again.");
 
-                await _unitOfWork.SaveChangesAsync();
-                await dbTransaction.CommitAsync();
-
-                return new AdjustBalanceResponse
-                {
-                    WalletNumber = wallet.WalletNumber,
-                    Balance = wallet.Balance,
-                    ReferenceNo = referenceNo,
-                    Remark = request.Remark
-                };
-            }
-            catch (DbUpdateConcurrencyException)
+            return new AdjustBalanceResponse
             {
-                await dbTransaction.RollbackAsync();
-                throw new AppException("Balance was modified by another transaction. Please try again.", StatusCodes.Status409Conflict);
-            }
-            catch (Exception)
-            {
-                await dbTransaction.RollbackAsync();
-                throw;
-            }
+                WalletNumber = wallet.WalletNumber,
+                Balance = wallet.Balance,
+                ReferenceNo = referenceNo,
+                Remark = request.Remark
+            };
         }
 
         public async Task<WalletLockResponse> SetWalletLockStateAsync(int walletId, bool isLocked, string requestedBy)
         {
             var wallet = await _unitOfWork.Wallets.GetWalletByIdAsync(walletId);
-            _walletValidator.ValidateState(wallet);
+            _walletValidator.ValidateState(wallet); 
 
             wallet.IsLocked = isLocked;
             wallet.Status = isLocked ? WalletConstants.Status.Blocked : WalletConstants.Status.Active;
-            wallet.UpdatedAt = DateTime.UtcNow;
+            wallet.UpdatedAt = _clock.UtcNow;
             wallet.UpdatedBy = requestedBy;
 
             _unitOfWork.Wallets.UpdateWallet(wallet);
@@ -458,5 +439,7 @@ namespace wallet.Services
                 Status = wallet.Status
             };
         }
+ 
+       #endregion;
     }
 }

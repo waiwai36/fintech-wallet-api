@@ -38,22 +38,27 @@ namespace wallet.DALs
                    .FirstOrDefaultAsync(t => t.ReferenceNo == referenceNo && t.Status == TransactionConstants.Status.Pending);
         }
 
+        public async Task<Transaction?> GetAnyByReferenceNoAsync(string referenceNo)
+        {
+            return await _context.Transactions.AsNoTracking()
+                   .FirstOrDefaultAsync(t =>
+                       t.ReferenceNo == referenceNo ||
+                       (t.ReferenceNo != null && EF.Functions.Like(t.ReferenceNo, $"{referenceNo}-%")));
+        }
+
         public void Update(Transaction transaction)
         {
             _context.Transactions.Update(transaction);
         }
 
-        public async Task<decimal> GetDailyAmountByTypeAsync(int walletId, DateTime date, string transactionType)
+        public async Task<decimal> GetDailyAmountByTypeAsync(int walletId, DateTime startUtc, DateTime endUtc, string transactionType)
         {
-            var startOfDay = date.Date;
-            var endOfDay = startOfDay.AddDays(1).AddTicks(-1);
-
             return await _context.Transactions.AsNoTracking()
                 .Where(t => t.WalletId == walletId
                             && t.TransactionType == transactionType
                             && t.Status == TransactionConstants.Status.Success
-                            && t.CreatedAt >= startOfDay
-                            && t.CreatedAt <= endOfDay)
+                            && t.CreatedAt >= startUtc
+                            && t.CreatedAt < endUtc)
                 .SumAsync(t => t.Amount);
         }
 
@@ -66,8 +71,8 @@ namespace wallet.DALs
                 .Select(g => new
                 {
                     TotalCount = g.Count(),
-                    TotalCredit = g.Where(t => t.TransactionType == TransactionConstants.Type.Deposit || t.TransactionType == TransactionConstants.Type.TransferIn || t.TransactionType == "Credit").Sum(t => (decimal?)t.Amount) ?? 0,
-                    TotalDebit = g.Where(t => t.TransactionType == TransactionConstants.Type.Withdraw || t.TransactionType == TransactionConstants.Type.TransferOut || t.TransactionType == "Debit").Sum(t => (decimal?)t.Amount) ?? 0
+                    TotalCredit = g.Where(t => t.TransactionType == TransactionConstants.Type.Deposit || t.TransactionType == TransactionConstants.Type.TransferIn || t.TransactionType == TransactionConstants.Type.Credit).Sum(t => (decimal?)t.Amount) ?? 0,
+                    TotalDebit = g.Where(t => t.TransactionType == TransactionConstants.Type.Withdraw || t.TransactionType == TransactionConstants.Type.TransferOut || t.TransactionType == TransactionConstants.Type.Debit).Sum(t => (decimal?)t.Amount) ?? 0
                 })
                 .FirstOrDefaultAsync();
 

@@ -8,7 +8,7 @@ namespace wallet.Services
     {
         Task<DepositResponse> InitiateBankDepositAsync(int userId, DepositRequest request, string requestedBy);
         Task<DepositResponse> ApproveBankDepositAsync(ApproveDepositRequest request, string requestedBy);
-        Task<WithDrawResponse> WithdrawAsync(int userId, WithdrawRequest requset, string requestedBy);
+        Task<WithDrawResponse> WithdrawAsync(int userId, WithdrawRequest request, string requestedBy);
         Task<TransferResponse> TransferAsync(int senderUserId, TransferRequest request, string requestedBy);
         Task<BankStatementResponse> GetBankStatementAsync(int userId, TransactionFilterRequest filter);
         Task<WalletDetailsResponse> GetWalletDetailsAsync(int userId);

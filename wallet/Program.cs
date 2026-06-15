@@ -107,6 +107,7 @@ builder.Services.AddScoped<ITransactionRepository, TransactionRepository>();
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<IWalletValidator, WalletValidator>();
+builder.Services.AddSingleton<IClock, SystemClock>();
 
 builder.Services.AddRateLimiter(options =>
 {

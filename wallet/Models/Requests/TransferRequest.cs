@@ -10,5 +10,8 @@ namespace wallet.Models.Requests
         [Required]
         [Range(1000, 1000000, ErrorMessage = "Transfer amount must be greater than zero.")]         
         public decimal Amount { get; set; }
+
+        [StringLength(50)]
+        public string? ReferenceNo { get; set; }
     }
 }
