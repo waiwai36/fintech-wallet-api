@@ -7,9 +7,7 @@
 ![Swagger](https://img.shields.io/badge/Swagger-OpenAPI-85EA2D?style=for-the-badge&logo=swagger&logoColor=black)
 ![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-CI%2FCD-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)
 
-A secure ASP.NET Core wallet backend for user registration, JWT/JWE authentication, digital wallet operations, admin balance control, payment gateway callbacks, and automated EC2 deployment.
-
-This API supports user wallets, deposits, withdrawals, transfers, bank statements, admin approvals, dynamic permission policies, and a GitHub Actions based CI/CD pipeline.
+A secure ASP.NET Core Web API backend that supports user registration, JWT/JWE authentication, digital wallet operations, administrative balance management, payment gateway integrations, and automated EC2 deployments.
 
 ---
 
@@ -19,6 +17,7 @@ This API supports user wallets, deposits, withdrawals, transfers, bank statement
 - [Tech Stack](#tech-stack)
 - [Architecture](#architecture)
 - [Project Structure](#project-structure)
+- [Core Wallet Engine](#core-wallet-engine)
 - [GitHub Actions CI/CD](#github-actions-cicd)
 - [Getting Started](#getting-started)
 - [Configuration](#configuration)
@@ -72,57 +71,9 @@ This API supports user wallets, deposits, withdrawals, transfers, bank statement
 
 ## Architecture
 
-The project follows Clean Architecture principles. The API layer handles requests, the service layer contains business rules, repository abstractions isolate data access, and EF Core maps the existing SQL Server database using a Database First approach.
+The application follows a layered architecture that separates API endpoints, business logic, infrastructure, and data access.
 
-```text
-Client
-  |
-  v
-API Layer
-Controllers, middleware, authentication, authorization
-  |
-  v
-Application / Service Layer
-Business rules, wallet operations, payment orchestration
-  |
-  v
-Data Access Layer
-Repositories, Unit of Work, EF Core DbContext
-  |
-  v
-Infrastructure
-SQL Server database, system services, payment gateway callbacks
-```
-
-Payment gateway flow:
-
-```text
-WalletController
-  |
-  v
-PaymentService
-  |
-  v
-Gateway Notify / Webhook
-  |
-  v
-Wallet Balance Settlement
-```
-
-Core responsibilities:
-
-| Layer | Responsibility |
-| --- | --- |
-| API | Controllers, routes, authentication, authorization, and middleware |
-| Application / Services | Business logic for auth, wallet operations, transfers, deposits, withdrawals, and payments |
-| Domain Models | Request/response models and wallet-related business data structures |
-| Data Access | Repository interfaces, repository implementations, and Unit of Work |
-| Infrastructure | EF Core `WalletdbContext`, SQL Server integration, token service, payment gateway service |
-| Cross-Cutting | Global exception handling, policy middleware, validation, hashing, and signature verification |
-
----
-
-## Project Structure
+### Project Structure
 
 ```text
 fintech-wallet-api/
@@ -140,16 +91,16 @@ fintech-wallet-api/
 |-- README.md
 |
 `-- wallet/
-    |-- Constants/
+    |-- Constants/                 # Shared application constants and configuration values
     |-- Controllers/               # API layer endpoints
     |-- DALs/                      # Data access repositories and Unit of Work
     |-- Data/                      # Database First DbContext and entities
     |-- Exceptions/                # Custom exceptions
-    |-- Helpers/                   # Hashing and validators
-    |-- Middleware/                # Cross-cutting middleware
-    |-- Models/                    # Request and response DTOs / domain-facing contracts
+    |-- Helpers/                   # Validation, hashing, transaction references, audit
+    |-- Middleware/                # Global exception handling and request pipeline middleware
+    |-- Models/                    # Request and response DTOs used by API contracts
     |-- Properties/                # Launch settings
-    |-- Services/                  # Application business logic
+    |-- Services/                  # Business logic for wallet transactions, payment gateway integration, token management, and authorization policies
     |-- Utils/                     # Utility classes
     |-- Program.cs                 # Startup and DI configuration
     |-- appsettings.json
@@ -158,6 +109,139 @@ fintech-wallet-api/
     `-- wallet.csproj
 ```
 
+### Request Flow
+
+```text
+Client
+   │
+   ▼
+Controllers
+   │
+   ▼
+Services
+   │
+   ▼
+DALs (Repositories / Unit of Work)
+   │
+   ▼
+Entity Framework Core
+   │
+   ▼
+SQL Server
+```
+### Architectural Characteristics
+
+- Layered Architecture
+- Repository & Unit of Work Pattern
+- Database-First Entity Framework Core
+- Dependency Injection
+- Global Exception Handling
+- Role & Permission-Based Authorization
+- CI/CD with GitHub Actions
+- Optimistic Concurrency Control (RowVersion)
+
+---
+
+## Core Wallet Engine
+
+The wallet engine is designed around transaction integrity, concurrency safety, and balance consistency.
+
+### Deposit Workflow
+
+```text
+Deposit
+├── Manual Bank Deposit
+│   ├── Generate Reference Number
+│   ├── Create Pending Transaction
+│   ├── Admin Approval
+│   ├── Credit Wallet Balance
+│   └── Mark Transaction Success
+│
+└── Payment Gateway Deposit
+    ├── Initialize Payment
+    ├── Create Pending Transaction
+    ├── Redirect To Gateway
+    ├── Customer Completes Payment
+    ├── Gateway Notify
+    ├── Gateway Callback
+    ├── Verify Signature
+    ├── Credit Wallet Balance
+    └── Mark Transaction Success
+
+```
+
+### Withdrawal Workflow
+
+```text
+Withdrawal
+├── Validate Wallet
+├── Check Existing Reference Number
+│   └── Return Previous Result If Already Processed
+├── Validate Withdrawal Amount
+├── Check Available Balance
+├── Check Daily Withdrawal Limit
+│   └── Daily Total + Amount <= Limit
+├── Begin Atomic Transaction
+├── Wallet Settlement
+├── Create Withdrawal Record
+└── Commit Transaction
+```
+
+### Transfer Workflow
+
+```text
+Transfer
+├── Validate Sender Wallet
+├── Validate Receiver Wallet
+├── Prevent Self Transfer
+├── Validate Currency
+├── Check Available Balance
+├── Check Daily Transfer Limit
+├── Check Existing Reference Number
+│   └── Return Previous Result If Already Processed
+├── Generate Transfer References
+│   ├── TRF-123456-OUT
+│   └── TRF-123456-IN
+├── Begin Atomic Transaction
+├── Sender Settlement
+│   ├── Debit Sender Wallet
+│   └── Create TransferOut Record
+├── Receiver Settlement
+│   ├── Credit Receiver Wallet
+│   └── Create TransferIn Record
+├── Update Audit Information
+└── Commit Transaction
+
+```
+
+### Concurrency Control
+
+```text
+Concurrency Control (RowVersion)
+├── Transaction A Reads Wallet (Version 10)
+├── Transaction B Reads Wallet (Version 10)
+├── Transaction A Updates Wallet
+│   └── Version 10 → 11
+├── Transaction A Commits
+├── Transaction B Attempts Update
+│   ├── Expected Version = 10
+│   └── Actual Version = 11
+└── Concurrency Exception Thrown
+```
+
+### Transaction Safety
+
+The system implements the following controls:
+
+* Atomic database transactions
+* Duplicate Request Protection
+* Reference-based Idempotent Operations
+* Daily transfer limits
+* Daily withdrawal limits
+* Before/After Balance Tracking
+* Audit trail tracking
+* Balance integrity checks
+* RowVersion Concurrency Control
 ---
 
 ## GitHub Actions CI/CD
@@ -374,20 +458,6 @@ These endpoints allow anonymous access because they are intended for payment gat
 | GET | `/api/v1/payment/payment-notify` | Handle gateway redirect/notify result |
 | POST | `/api/v1/payment/payment-confirm` | Settle gateway transaction callback |
 
-### Transaction Reference and Retry Behavior
-
-For withdraw and transfer requests, clients should generate and send a unique `referenceNo` before calling the API. This prevents duplicate withdrawals or transfers when the backend succeeds but the client loses the response because of a timeout or network issue.
-
-If the same `referenceNo` is sent again and the transaction is already successful, the API returns the existing success result without applying the transaction again.
-
-If `referenceNo` is omitted, the backend generates one, but the client cannot safely retry after a lost response because it may not know that generated value.
-
-For transfers, the API returns one base `referenceNo` to the client, while the database stores two ledger references:
-
-```text
-TRF-ABC123456789-OUT
-TRF-ABC123456789-IN
-```
 
 ---
 
@@ -413,27 +483,69 @@ The API validates:
 
 ## Database
 
-The API uses `WalletdbContext` with SQL Server and follows a Database First approach.
+The project uses Entity Framework Core Database-First approach with reverse engineering from an existing SQL Server database.
 
-This project does not use EF Core migrations as the source of truth. The database schema is maintained in SQL Server first, and the EF Core `DbContext` plus entity classes are generated or updated from the existing database structure.
+Entity Relationship Diagram (ERD):
 
-Main entities:
+```mermaid
+erDiagram
 
-| Entity | Description |
-| --- | --- |
-| `Users` | Application users |
-| `Roles` | User role definitions |
-| `RoleClaims` | Dynamic permission claims |
-| `Wallets` | Wallet account data |
-| `Transactions` | Ledger and transaction records |
+ROLE ||--o{ USER : has
+ROLE ||--o{ ROLECLAIM : owns
+USER ||--o{ WALLET : owns
+WALLET ||--o{ TRANSACTION : records
 
-When the database schema changes, update the EF Core model from the database instead of adding migrations. A typical scaffold command looks like this:
+ROLE {
+    int RoleId PK
+    string RoleName
+}
+
+ROLECLAIM {
+    int Id PK
+    int RoleId FK
+    string ClaimType
+    string ClaimValue
+}
+
+USER {
+    int UserId PK
+    int RoleId FK
+    string UserName
+    string Email
+    bool IsActive
+}
+
+WALLET {
+    int WalletId PK
+    int UserId FK
+    string WalletNumber
+    decimal Balance
+    string Currency
+    string Status
+    decimal DailyTransferLimit
+    decimal DailyWithdrawLimit
+    bool IsLocked
+    byte[] RowVersion
+}
+
+TRANSACTION {
+    guid TransactionId PK
+    int WalletId FK
+    string ReferenceNo
+    string TransactionType
+    string PaymentMethod
+    decimal Amount
+    decimal BeforeBalance
+    decimal AfterBalance
+    string Status
+    int RelatedWalletId
+    datetime CreatedAt
+}
+```
 
 ```bash
 dotnet ef dbcontext scaffold "<connection-string>" Microsoft.EntityFrameworkCore.SqlServer --context WalletdbContext --output-dir Data/Entities --context-dir Data --force
 ```
-
-Review generated changes carefully before committing, especially entity relationships, nullable columns, decimal precision, and default values.
 
 ---
 
@@ -458,9 +570,7 @@ Failure response:
   "data": null
 }
 ```
-
 ---
-
 
 ## Deployment Notes
 
@@ -471,4 +581,3 @@ Failure response:
 - GitHub Actions performs a `/health` check after deployment.
 - The deployment keeps the latest 5 release folders on the server.
 
-# fintech-wallet-api
