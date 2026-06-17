@@ -202,15 +202,30 @@ jobs:
             if [ -f "$INFRA_TEMP/walletapi.conf" ]; then
               sudo cp $INFRA_TEMP/walletapi.conf /etc/nginx/sites-available/$APP
               sudo ln -sf /etc/nginx/sites-available/$APP /etc/nginx/sites-enabled/
-              sudo nginx -t && sudo systemctl restart nginx
+               sudo nginx -t
+               sudo systemctl reload nginx
             fi
 
             # 6. Restart & Health check
-            sudo systemctl restart $SERVICE
+            sudo systemctl restart "$SERVICE"
+            echo "Waiting for $SERVICE to start..."
 
-            sleep 10
-            curl -f http://localhost:$PORT/health || (echo "Health check failed" && exit 1)
-           
+            for i in {1..10}; do
+            if curl -fsS "http://localhost:$PORT/health"; then
+             echo "Health check passed"
+            break
+            fi
+             echo "Health check failed, retrying... attempt $i"
+              sleep 3
+
+              if [ "$i" -eq 10 ]; then
+               echo "Health check failed after retries"
+              sudo systemctl status "$SERVICE" --no-pager
+              sudo journalctl -u "$SERVICE" -n 100 --no-pager
+             exit 1
+              fi
+             done
+             
             # 7. Keep latest 5 releases
              sudo ls -dt $BASE_PATH/releases/* \
               | tail -n +6 \
