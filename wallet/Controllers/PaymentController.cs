@@ -28,7 +28,8 @@ namespace wallet.Controllers
             _paymentService = paymentServicee;
             _context = context;
             _walletService = walletService;
-            _gatewaySecretKey = configuration["PaymentGateway:SecretKey"];
+            _gatewaySecretKey = configuration["PaymentGateway:SecretKey"]
+                ?? throw new InvalidOperationException("PaymentGateway:SecretKey is not configured.");
         }
 
         /// <summary>

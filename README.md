@@ -16,39 +16,52 @@ A secure ASP.NET Core Web API backend that supports user registration, JWT/JWE a
 - [Features](#features)
 - [Tech Stack](#tech-stack)
 - [Architecture](#architecture)
-- [Project Structure](#project-structure)
 - [Core Wallet Engine](#core-wallet-engine)
 - [GitHub Actions CI/CD](#github-actions-cicd)
-- [Getting Started](#getting-started)
 - [Configuration](#configuration)
 - [API Endpoints](#api-endpoints)
 - [Authentication](#authentication)
 - [Database](#database)
-- [Useful Commands](#useful-commands)
 
 ---
 
 ## Features
 
-- User registration with automatic wallet creation
-- Secure login with BCrypt password hashing
-- JWT Bearer authentication with token encryption support
-- Refresh token rotation
-- Role-based access control for `User` and `Admin`
-- Dynamic permission policies such as `Deposit`, `Transfer`, `Statement`, and `CashOut_Withdraw`
-- Manual bank-transfer deposit flow
-- Online payment gateway deposit initialization
-- Withdraw and wallet-to-wallet transfer
-- Bank statement and wallet detail lookup
-- Admin wallet lock/unlock
-- Admin manual credit/debit adjustment
-- Admin pending bank deposit approval
-- Payment gateway notify and confirmation endpoints
-- Global exception handling with consistent API responses
-- Swagger/OpenAPI documentation
-- Login rate limiting
-- URL-based API versioning, for example `/api/v1/...`
-- GitHub Actions build and deployment workflow
+#### Authentication & Authorization
+
+* User registration with automatic wallet creation
+* Secure login with BCrypt password hashing
+* JWT/JWE authentication with refresh tokens
+* User and Admin role management
+* Permission-based authorization
+
+#### Wallet Operations
+
+* Wallet-to-wallet transfer
+* Withdraw
+* Bank statement lookup
+* Wallet detail lookup
+
+#### Deposit Management
+
+* Manual bank deposit approval
+* Online payment gateway deposit initialization
+* Online payment gateway webhook handling
+
+#### Administration
+
+* Wallet lock/unlock
+* Balance adjustment
+* Pending bank deposit approval
+
+#### API & Infrastructure
+
+* API versioning (`/api/v1/...`)
+* Login rate limiting
+* Swagger API documentation
+* Global exception handling
+* GitHub Actions build and deployment workflow
+
 
 ---
 
@@ -60,53 +73,49 @@ A secure ASP.NET Core Web API backend that supports user registration, JWT/JWE a
 | Language | C# |
 | Database | SQL Server |
 | ORM | Entity Framework Core 8, Database First |
-| Architecture | Clean Architecture |
+| Architecture | Monolithic Layered (N-Tier) Architecture |
 | Authentication | JWT Bearer with encrypted token support |
 | Authorization | Roles and dynamic policies |
-| Password Hashing | BCrypt.Net-Next |
-| Documentation | Swagger / Swashbuckle |
+| Documentation |URL API Versioning & Swagger OpenAPI |
 | Deployment | GitHub Actions, EC2, systemd, Nginx |
 
 ---
 
 ## Architecture
 
-The application follows a layered architecture that separates API endpoints, business logic, infrastructure, and data access.
+The application follows a monolithic layered architecture that separates API endpoints, business logic, data access, shared helpers, middleware, and database access.
 
 ### Project Structure
 
 ```text
 fintech-wallet-api/
-|
-|-- .github/
-|   `-- workflows/
-|       |-- ci-cd.yml              # Main GitHub Actions pipeline
-|       |-- reusable-build.yml     # Reusable build and deploy workflow
-|       `-- infra/
-|           |-- production.service # Production systemd service
-|           |-- staging.service    # Staging systemd service
-|           `-- walletapi.conf     # Nginx reverse proxy config
-|
-|-- wallet.sln
-|-- README.md
-|
-`-- wallet/
-    |-- Constants/                 # Shared application constants and configuration values
-    |-- Controllers/               # API layer endpoints
-    |-- DALs/                      # Data access repositories and Unit of Work
-    |-- Data/                      # Database First DbContext and entities
-    |-- Exceptions/                # Custom exceptions
-    |-- Helpers/                   # Validation, hashing, transaction references, audit
-    |-- Middleware/                # Global exception handling and request pipeline middleware
-    |-- Models/                    # Request and response DTOs used by API contracts
-    |-- Properties/                # Launch settings
-    |-- Services/                  # Business logic for wallet transactions, payment gateway integration, token management, and authorization policies
-    |-- Utils/                     # Utility classes
-    |-- Program.cs                 # Startup and DI configuration
-    |-- appsettings.json
-    |-- appsettings.Staging.json
-    |-- appsettings.Production.json
-    `-- wallet.csproj
+├── .github/
+│   └── workflows/
+│       ├── ci-cd.yml              # Main CI/CD pipeline
+│       ├── reusable-build.yml     # Reusable deployment workflow
+│       └── infra/
+│           ├── production.service # Production systemd unit
+│           ├── staging.service    # Staging systemd unit
+│           └── walletapi.conf     # Nginx reverse proxy configuration
+├── wallet.sln
+├── README.md
+└── wallet/                        # Main Web API Application
+    ├── Controllers/               # API Routing Layer & Request Contracts
+    ├── Middleware/                # Request Pipeline Hooks & Global Exception Handlers
+    ├── Models/                    # Inbound Request/Outbound Response DTOs
+    ├── Services/                  # Core Business Domain & External Gateways
+    ├── DALs/                      # Repository Layer & Unit of Work 
+    ├── Data/                      # Database-First DBContext & Persistent Entities
+    ├── Constants/                 # Shared application constants
+    ├── Exceptions/                # Custom application exceptions
+    ├── Helpers/                   # Signature-Verification, Reference-Generation, Validation & Transaction-Runner Logic
+    ├── Utils/                     # Unique Identifier Factory (Wallet & Reference Number Generation)
+    ├── Properties/                # Visual Studio Launch Settings
+    ├── Program.cs                 # Startup, middleware, API versioning, Swagger, and DI 
+    ├── appsettings.json           # Default Settings
+    ├── appsettings.Staging.json   # Staging Environment Overrides
+    ├── appsettings.Production.json# Production Environment Overrides
+    └── wallet.csproj              # Single Project Manifest File
 ```
 
 ### Request Flow
@@ -121,7 +130,8 @@ Controllers
 Services
    │
    ▼
-DALs (Repositories / Unit of Work)
+DALs
+(Repositories / Unit of Work)
    │
    ▼
 Entity Framework Core
@@ -129,16 +139,18 @@ Entity Framework Core
    ▼
 SQL Server
 ```
+
 ### Architectural Characteristics
 
-- Layered Architecture
-- Repository & Unit of Work Pattern
-- Database-First Entity Framework Core
-- Dependency Injection
+- Monolithic Layered (N-Tier) Design
+- Repository & Unit of Work (DALs)
+- Database-First Schema Management
 - Global Exception Handling
 - Role & Permission-Based Authorization
-- CI/CD with GitHub Actions
+- Unique Identifier & Idempotency Key Generation
+- Atomic Transaction Execution Management
 - Optimistic Concurrency Control (RowVersion)
+- Automated CI/CD with Nginx & Systemd Host Deployment
 
 ---
 
@@ -151,22 +163,45 @@ The wallet engine is designed around transaction integrity, concurrency safety, 
 ```text
 Deposit
 ├── Manual Bank Deposit
+│   ├── Validate Wallet
 │   ├── Generate Reference Number
 │   ├── Create Pending Transaction
-│   ├── Admin Approval
+│   ├── Begin Transaction
+│   ├── Save Pending Transaction
+│   └── Commit Transaction
+│
+├── Manual Admin Verification/Approval
+│   ├── Find Pending Bank Deposit Transaction
+│   ├── Validate Wallet
+│   ├── Validate Deposit Type And Payment Method
+│   ├── Return Previous Result If Duplicate
 │   ├── Credit Wallet Balance
-│   └── Mark Transaction Success
+│   ├── Update Audit Information
+│   ├── Mark Transaction Success
+│   └── Commit Transaction
 │
 └── Payment Gateway Deposit
-    ├── Initialize Payment
+    ├── Validate Wallet
     ├── Create Pending Transaction
-    ├── Redirect To Gateway
+    ├── Begin Transaction
+    ├── Save Pending Transaction
+    ├── Commit Transaction
+    ├── Generate Payment URL
     ├── Customer Completes Payment
     ├── Gateway Notify
-    ├── Gateway Callback
-    ├── Verify Signature
-    ├── Credit Wallet Balance
-    └── Mark Transaction Success
+    │   ├── MD5 Digital Signature Integrity Verification
+    │   ├── Validate Merchant Order ID
+    │   ├── Find Transaction
+    │   └── Return Frontend Success/Fail URL
+    └── Gateway Callback
+        ├── MD5 Digital Signature Integrity Verification
+        ├── Validate Merchant Order ID
+        ├── Find Pending Transaction
+        ├── Validate Wallet
+        ├── Credit Wallet Balance If Success
+        ├── Mark Transaction Success Or Failed
+        ├── Update Audit Information
+        └── Commit Transaction
 
 ```
 
@@ -176,15 +211,17 @@ Deposit
 Withdrawal
 ├── Validate Wallet
 ├── Check Existing Reference Number
-│   └── Return Previous Result If Already Processed
+│   └── Return Previous Result If Duplicate
 ├── Validate Withdrawal Amount
 ├── Check Available Balance
 ├── Check Daily Withdrawal Limit
 │   └── Daily Total + Amount <= Limit
-├── Begin Atomic Transaction
-├── Wallet Settlement
-├── Create Withdrawal Record
+├── Begin Transaction 
+├── Deduct Wallet Balance 
+├── Save Transaction Record 
+├── Update Audit Information
 └── Commit Transaction
+
 ```
 
 ### Transfer Workflow
@@ -198,11 +235,11 @@ Transfer
 ├── Check Available Balance
 ├── Check Daily Transfer Limit
 ├── Check Existing Reference Number
-│   └── Return Previous Result If Already Processed
+│   └── Return Previous Result If Duplicate
 ├── Generate Transfer References
 │   ├── TRF-123456-OUT
 │   └── TRF-123456-IN
-├── Begin Atomic Transaction
+├── Begin Transaction
 ├── Sender Settlement
 │   ├── Debit Sender Wallet
 │   └── Create TransferOut Record
@@ -229,45 +266,44 @@ Concurrency Control (RowVersion)
 └── Concurrency Exception Thrown
 ```
 
-### Transaction Safety
-
-The system implements the following controls:
-
-* Atomic database transactions
-* Duplicate Request Protection
-* Reference-based Idempotent Operations
-* Daily transfer limits
-* Daily withdrawal limits
-* Before/After Balance Tracking
-* Audit trail tracking
-* Balance integrity checks
-* RowVersion Concurrency Control
----
 
 ## GitHub Actions CI/CD
 
-This repository includes a reusable GitHub Actions workflow for build and deployment.
+```text 
+Push [develop] Branch  ──► Staging Automation Pipeline
+Push [main] Branch     ──► Production Automation Pipeline
+```
 
-```text
-Push to develop  -> Staging workflow
-Push to main     -> Production workflow
+Deployment Steps
 
-Workflow:
-Restore and build
--> Publish artifact
--> Copy to EC2
--> Update current release
--> Restart systemd service
--> Nginx reverse proxy
--> Health check /health
+```mermaid
+flowchart LR
+    A[Checkout] --> B[Cache]
+    B --> C[Setup .NET 8]
+    C --> D[Restore]
+    D --> E[Build]
+    E --> F[Publish]
+    F --> G[Upload Artifact]
+
+    G --> H[Download Artifact]
+    H --> I[Generate Env]
+    I --> J[Copy to EC2]
+    J --> K[Create Release]
+    K --> L[Switch Symlink]
+    L --> M[Update Service]
+    M --> N[Update Nginx]
+    N --> O[Restart API]
+    O --> P[Health Check]
+    P --> Q[Keep 5 Releases]
+    Q --> R[Cleanup]
 ```
 
 ### Workflow Files
 
 | File | Purpose |
 | --- | --- |
-| `.github/workflows/ci-cd.yml` | Main workflow entry point for `main` and `develop` branches |
-| `.github/workflows/reusable-build.yml` | Shared build, publish, artifact, deploy, restart, and health-check workflow |
+| `.github/workflows/ci-cd.yml` | Base multi-branch route coordinator (main & develop) |
+| `.github/workflows/reusable-build.yml` | Shared build, artifact management, deployment, and service polling script |
 | `.github/workflows/infra/staging.service` | Staging `systemd` service file |
 | `.github/workflows/infra/production.service` | Production `systemd` service file |
 | `.github/workflows/infra/walletapi.conf` | Nginx reverse proxy config |
@@ -278,28 +314,7 @@ Restore and build
 | --- | --- | --- | --- |
 | Push to `develop` | Staging | `5151` | `/var/www/walletapi-staging` |
 | Push to `main` | Production | `5001` | `/var/www/walletapi` |
-| Pull request to `main` | CI validation | - | Build workflow |
 
-### Pipeline Steps
-
-1. Checkout source code
-2. Cache NuGet packages
-3. Setup .NET 8 SDK
-4. Restore dependencies
-5. Build with `Release` configuration
-6. Publish into `publish-out`
-7. Upload build artifact
-8. Download artifact in deploy job
-9. Generate `walletapi.env` from GitHub Secrets
-10. Copy app, infra files, and env file to EC2
-11. Create timestamped release folder
-12. Switch `current` symlink to latest release
-13. Install/update `systemd` service
-14. Install/update Nginx config
-15. Restart API service
-16. Run `/health` deployment check
-17. Keep the latest 5 releases
-18. Cleanup Temp Files
 
 ### Required GitHub Secrets
 
@@ -324,54 +339,6 @@ PaymentGateway__SecretKey
 
 ---
 
-## Getting Started
-
-### Prerequisites
-
-- .NET SDK 8.0 or later
-- SQL Server
-- Visual Studio 2022, Rider, VS Code, or another C# editor
-
-### Installation
-
-```bash
-# Clone the repository
-git clone <repository-url>
-
-# Navigate to the project folder
-cd fintech-wallet-api
-
-# Restore dependencies
-dotnet restore wallet.sln
-
-# Build the solution
-dotnet build wallet.sln
-
-# Run the API
-dotnet run --project wallet/wallet.csproj
-```
-
-The API can be opened at:
-
-```text
-http://localhost:5151
-
-```
-
-Swagger UI:
-
-```text
-http://localhost:5151/swagger
-```
-
-Health check:
-
-```text
-GET /health
-```
-
----
-
 ## Configuration
 
 Update `wallet/appsettings.json` for local development, or use environment variables for deployment.
@@ -389,6 +356,9 @@ Update `wallet/appsettings.json` for local development, or use environment varia
   },
   "PaymentGateway": {
     "SecretKey": "your-payment-gateway-secret"
+  },
+  "Wallet": {
+    "BusinessTimeZone": "Asia/Yangon"
   }
 }
 ```
@@ -399,14 +369,6 @@ Important:
 - `Jwt:EncryptionKey` must be Base64 encoded.
 - Do not commit real database strings, JWT secrets, or payment gateway secrets.
 - Production secrets should be stored in GitHub Secrets, environment variables.
-
-Environment config files:
-
-| File | Purpose |
-| --- | --- |
-| `wallet/appsettings.json` | Default app settings |
-| `wallet/appsettings.Staging.json` | Staging settings |
-| `wallet/appsettings.Production.json` | Production settings |
 
 ---
 
@@ -458,7 +420,27 @@ These endpoints allow anonymous access because they are intended for payment gat
 | GET | `/api/v1/payment/payment-notify` | Handle gateway redirect/notify result |
 | POST | `/api/v1/payment/payment-confirm` | Settle gateway transaction callback |
 
+## Response Format
 
+Success response:
+
+```json
+{
+  "success": true,
+  "message": "Login successful.",
+  "data": {}
+}
+
+```
+Failure response:
+
+```json
+{
+  "success": false,
+  "message": "Unauthorized access. Token is missing or invalid.",
+  "data": null
+}
+```
 ---
 
 ## Authentication
@@ -549,30 +531,7 @@ dotnet ef dbcontext scaffold "<connection-string>" Microsoft.EntityFrameworkCore
 
 ---
 
-## Response Format
 
-Success response:
-
-```json
-{
-  "success": true,
-  "message": "Login successful.",
-  "data": {}
-}
-```
-
-Failure response:
-
-```json
-{
-  "success": false,
-  "message": "Unauthorized access. Token is missing or invalid.",
-  "data": null
-}
-```
----
-
-## Deployment Notes
 
 - Staging runs on `http://localhost:5151`.
 - Production runs on `http://localhost:5001`.

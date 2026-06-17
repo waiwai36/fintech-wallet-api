@@ -26,7 +26,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     uses: ./.github/workflows/reusable-build.yml
     with:
-      environment: Production
+      environment: production
 
     secrets:
       EC2_HOST: ${{ secrets.EC2_HOST }}
