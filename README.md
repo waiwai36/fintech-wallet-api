@@ -529,14 +529,3 @@ TRANSACTION {
 dotnet ef dbcontext scaffold "<connection-string>" Microsoft.EntityFrameworkCore.SqlServer --context WalletdbContext --output-dir Data/Entities --context-dir Data --force
 ```
 
----
-
-
-
-- Staging runs on `http://localhost:5151`.
-- Production runs on `http://localhost:5001`.
-- Nginx proxies public HTTP traffic to the local API ports.
-- `systemd` keeps the API running as a service.
-- GitHub Actions performs a `/health` check after deployment.
-- The deployment keeps the latest 5 release folders on the server.
-
