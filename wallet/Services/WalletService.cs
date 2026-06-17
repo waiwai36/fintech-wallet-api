@@ -421,7 +421,8 @@ namespace wallet.Services
         public async Task<WalletLockResponse> SetWalletLockStateAsync(int walletId, bool isLocked, string requestedBy)
         {
             var wallet = await _unitOfWork.Wallets.GetWalletByIdAsync(walletId);
-            _walletValidator.ValidateState(wallet); 
+            if (wallet == null)
+                throw new AppException("Wallet account not found.", StatusCodes.Status404NotFound);
 
             wallet.IsLocked = isLocked;
             wallet.Status = isLocked ? WalletConstants.Status.Blocked : WalletConstants.Status.Active;

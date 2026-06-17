@@ -1,6 +1,7 @@
-﻿using System.Security.Claims;
+using System.Security.Claims;
+using System.Text.Json;
 using wallet.Data;
-using wallet.Data.Entities;
+using wallet.Models.Responses;
 
 namespace wallet.Middleware
 {
@@ -15,30 +16,40 @@ namespace wallet.Middleware
 
         public async Task InvokeAsync(HttpContext context, IServiceScopeFactory scopeFactory)
         {
-
             if (context.User.Identity?.IsAuthenticated == true)
             {
+                var userIdValue = context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                                  ?? context.User.FindFirst("sub")?.Value;
 
-                var userId = int.Parse(context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value);
-
+                if (!int.TryParse(userIdValue, out var userId))
+                {
+                    await WriteForbiddenResponseAsync(context, "Invalid authenticated user.");
+                    return;
+                }
 
                 using var scope = scopeFactory.CreateScope();
                 var dbContext = scope.ServiceProvider.GetRequiredService<WalletdbContext>();
-
 
                 var user = await dbContext.Users.FindAsync(userId);
 
                 if (user == null || !user.IsActive || user.IsSuspended)
                 {
-                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                    context.Response.ContentType = "text/plain";
-                    await context.Response.WriteAsync("Your account is disabled or suspended.");
+                    await WriteForbiddenResponseAsync(context, "Your account is disabled or suspended.");
                     return;
                 }
-
-
             }
+
             await _next(context);
+        }
+
+        private static async Task WriteForbiddenResponseAsync(HttpContext context, string message)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            context.Response.ContentType = "application/json";
+
+            var response = ApiResponse<object?>.Fail(message);
+            var jsonOptions = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+            await context.Response.WriteAsJsonAsync(response, jsonOptions);
         }
     }
 }

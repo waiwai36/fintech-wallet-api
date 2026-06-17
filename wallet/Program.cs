@@ -51,7 +51,7 @@ builder.Services.AddDbContext<WalletdbContext>(options =>
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 .AddJwtBearer(options =>
 {
-    options.RequireHttpsMetadata = false; // dev only
+    options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
     options.TokenValidationParameters = new TokenValidationParameters
     {
 
@@ -66,10 +66,10 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 
         ValidateIssuerSigningKey = true,
         IssuerSigningKey = new SymmetricSecurityKey(
-            Convert.FromBase64String(builder.Configuration["Jwt:Key"])
+            Convert.FromBase64String(GetRequiredConfig("Jwt:Key"))
         ),
         TokenDecryptionKey = new SymmetricSecurityKey(
-           Convert.FromBase64String(builder.Configuration["Jwt:EncryptionKey"])
+           Convert.FromBase64String(GetRequiredConfig("Jwt:EncryptionKey"))
         )
     };
     options.Events = new JwtBearerEvents
@@ -182,6 +182,12 @@ builder.Services.AddSwaggerGen(options =>
 var app = builder.Build();
 
 var apiVersionProvider = app.Services.GetRequiredService<IApiVersionDescriptionProvider>();
+string GetRequiredConfig(string key)
+{
+    return builder.Configuration[key]
+        ?? throw new InvalidOperationException($"{key} is not configured.");
+}
+
 static async Task HandleJwtErrorDirectlyAsync(HttpContext context, Exception exception)
 {   
     var (statusCode, message) = GlobalExceptionMiddleware.MapException(exception);
